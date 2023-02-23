@@ -1,0 +1,152 @@
+defaults: &defaults
+  working_directory: ~/gatsby/
+
+node: &node
+  docker:
+    - image: circleci/node:12
+
+alpine: &alpine
+  docker:
+    - image: markgono/alpine-vps-worker
+
+version: 2.1
+jobs:
+  shellcheck:
+    docker:
+      - image: koalaman/shellcheck-alpine:latest
+    steps:
+      - checkout
+      - run:
+          name: Check Scripts
+          command: |
+            find . -type f -name '*.sh' | wc -l
+            find . -type f -name '*.sh' | xargs shellcheck --external-sources
+  install-dependencies:
+    <<: *defaults
+    <<: *node
+    steps:
+      - checkout:
+          path: ~/gatsby/
+
+      - attach_workspace:
+          at: ~/gatsby/
+
+      - restore_cache:
+          key: node_modules-{{ checksum "package.json" }}
+
+      - run:
+          name: Install Node Modules
+          command: npm i
+
+      - save_cache:
+          key: node_modules-{{ checksum "package.json" }}
+          paths:
+            - node_modules
+
+  create-config:
+    <<: *defaults
+    <<: *alpine
+    steps:
+      - checkout:
+          path: ~/gatsby/
+      - run:
+          name: Create config
+          working_directory: ~/gatsby/scripts/
+          command: >
+            sudo -E sh ./create_config.sh
+      - persist_to_workspace:
+          root: ~/gatsby/
+          paths:
+            - scripts/config.sh
+
+  test:
+    <<: *defaults
+    <<: *node
+    steps:
+      - checkout:
+          path: ~/gatsby/
+      - restore_cache:
+          key: node_modules-{{ checksum "package.json" }}
+      - run:
+          name: Run tests
+          command: |
+            npm test
+  build:
+    <<: *defaults
+    <<: *node
+    steps:
+      - checkout:
+          path: ~/gatsby/
+      - restore_cache:
+          key: node_modules-{{ checksum "package.json" }}
+      - run:
+          name: Build project
+          command: |
+            CI=false npm run build:ci
+      - persist_to_workspace:
+          root: ~/gatsby/
+          paths:
+            - public
+            - scripts
+
+  deploy:
+    <<: *defaults
+    <<: *alpine
+    steps:
+      - attach_workspace:
+          at: ~/gatsby/
+      - add_ssh_keys:
+          fingerprints:
+            - "4d:1f:ae:e9:01:0d:7b:35:ab:59:ba:ac:7d:e6:49:c4"
+      - run:
+          name: Verify remote host
+          command: |
+            ssh-keyscan $REMOTE_URL >> ~/.ssh/known_hosts
+      - run:
+          name: Deploy scripts to remote
+          working_directory: ~/gatsby/scripts/
+          command: |
+            rsync -va --delete . $REMOTE_USER@$REMOTE_URL:scripts
+      - run:
+          name: Deploy public directory to remote
+          working_directory: ~/gatsby/public/
+          command: |
+            rsync -va --delete . $REMOTE_USER@$REMOTE_URL:$REMOTE_DIR
+      - run:
+          name: Connect to remote
+          command: |
+            ssh -o StrictHostKeyChecking=no $REMOTE_USER@$REMOTE_URL '
+            cd scripts && . config.sh && echo "$PASSWORD" | sudo -S sh deploy.sh'
+workflows:
+  version: 2
+  push:
+    jobs:
+      - shellcheck
+      - install-dependencies:
+          filters:
+            branches:
+              only:
+                - master
+      - test:
+          requires:
+            - install-dependencies
+      - build:
+          requires:
+            - install-dependencies
+          filters:
+            branches:
+              only:
+                - master
+      - create-config:
+          filters:
+            branches:
+              only:
+                - master
+      - deploy:
+          requires:
+            - build
+            - create-config
+          filters:
+            branches:
+              only:
+                - master
